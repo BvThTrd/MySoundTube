@@ -2,7 +2,7 @@ MySoundTube - Docker Setup
 ==========================
 
 A self-hosted web app to download SoundCloud and YouTube tracks and playlists as
-MP3/M4A/FLAC/WAV with embedded metadata, and YouTube videos as MP4.
+MP3/M4A/FLAC/WAV/AIFF with embedded metadata, and YouTube videos as MP4.
 Protected by a password login.
 
 
@@ -78,7 +78,7 @@ Single track
   - Paste any SoundCloud or YouTube track URL
   - Auto-detects the platform and shows a badge (SoundCloud / YouTube)
   - Preview: fetches title, artist, duration, and cover art
-  - Download as `MP3`, `M4A`, `FLAC`, or `WAV`
+  - Download as `MP3`, `M4A`, `FLAC`, `WAV`, or `AIFF`
   - YouTube only: download as `MP4` video (best video + audio, merged)
     The MP4 format button appears automatically when a YouTube URL is detected
 
@@ -99,9 +99,10 @@ Metadata embedded in every file
   - Album:  download date (`YYYYMMDD`)
   - Cover:  thumbnail embedded (audio formats and MP4). YouTube audio gets the
             square album cover (as shown on YouTube Music) instead of the 16:9 frame
-            WAV: tags are written twice, as RIFF INFO and as an ID3v2.3 chunk holding
-            the same fields plus the cover. Rekordbox reads the ID3 chunk when present,
-            so it shows the cover. Already imported tracks: right-click, Reload Tag
+            WAV: tags are written as RIFF INFO and as an ID3v2.3 chunk with the cover.
+            Rekordbox never shows artwork from WAV files (tested, any chunk layout):
+            for lossless with a cover in Rekordbox, use AIFF
+            AIFF: same uncompressed audio as WAV, ID3v2.3 tag with the cover
 
 Filename format:  `Artist - Track Title.ext`
 Playlist files:   `01 - Artist - Track Title.ext`
@@ -134,7 +135,7 @@ docker compose down
 TROUBLESHOOTING
 ---------------
 
-- **FLAC/WAV slow** — Normal, lossless conversion takes longer
+- **FLAC/WAV/AIFF slow** — Normal, lossless conversion takes longer
 - **MP4 slow** — Normal, `yt-dlp` fetches separate video and audio streams then merges them
 - **Port conflict** — Set `PORT=8080` (or any free port) in `.env` or Portainer
 - **`$` sign in hash broken** — In `.env`, escape every `$` in the bcrypt hash as `$$`

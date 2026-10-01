@@ -17,6 +17,7 @@ from bcrypt import checkpw
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from mutagen.id3 import APIC, COMM, TALB, TCON, TDRC, TIT2, TPE1, TRCK
+from mutagen.aiff import AIFF
 from mutagen.wave import WAVE
 
 app = Flask(__name__)
@@ -32,8 +33,13 @@ DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 TOKEN_TTL_SECONDS = 3600
 
-VALID_FORMATS = frozenset(("mp3", "m4a", "flac", "wav", "mp4"))
-MIME_MAP = {"mp3": "audio/mpeg", "m4a": "audio/mp4", "flac": "audio/flac", "wav": "audio/wav", "mp4": "video/mp4"}
+VALID_FORMATS = frozenset(("mp3", "m4a", "flac", "wav", "aiff", "mp4"))
+PCM_FORMATS = ("wav", "aiff")
+MIME_MAP = {
+    "mp3": "audio/mpeg", "m4a": "audio/mp4", "flac": "audio/flac",
+    "wav": "audio/wav", "aiff": "audio/aiff", "mp4": "video/mp4",
+}
+FFMPEG_PATH = "/usr/bin/ffmpeg"
 ALLOWED_SCHEMES = {"http", "https"}
 ALLOWED_HOSTS_SC = {"soundcloud.com", "www.soundcloud.com", "on.soundcloud.com", "m.soundcloud.com"}
 ALLOWED_HOSTS_YT = {"youtube.com", "www.youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"}
@@ -53,6 +59,10 @@ SQUARE_COVER_ARGS = [
 
 # SoundCloud Go+ tracks only expose 30 s "preview" formats to free accounts; never deliver one as the track
 NO_PREVIEW = "[format_id!*=preview]"
+
+# YouTube's auto-generated artist channels are named "<Artist> - Topic"
+TOPIC_SUFFIX = " - Topic"
+STRIP_TOPIC_ARGS = ["--replace-in-metadata", "uploader,artist", f"{TOPIC_SUFFIX}$", ""]
 
 _ERROR_HINTS = (
     (("requested format is not available",),
@@ -190,11 +200,12 @@ def _build_ytdlp_video_cmd(output_template: str, is_playlist: bool = False) -> l
         cmd += ["--no-playlist"]
     cmd += [
         "-f", "bv*+ba/b",
+        *STRIP_TOPIC_ARGS,
         "--merge-output-format", "mp4",
         "--embed-metadata",
         "--embed-thumbnail",
         "--output", output_template,
-        "--ffmpeg-location", "/usr/bin/ffmpeg",
+        "--ffmpeg-location", FFMPEG_PATH,
     ]
     return cmd
 
@@ -206,17 +217,19 @@ def _build_ytdlp_cmd(fmt: str, output_template: str, is_playlist: bool = False, 
         cmd += ["--no-playlist"]
     cmd += [
         "--extract-audio",
-        "--audio-format", fmt,
+        # yt-dlp has no AIFF output: download WAV, _finalize_pcm_files converts it
+        "--audio-format", "wav" if fmt == "aiff" else fmt,
         "-f", f"ba{NO_PREVIEW}",
         "--audio-quality", "0",
         "--embed-metadata",
         "--parse-metadata", "%(uploader)s:%(artist)s",
+        *STRIP_TOPIC_ARGS,
         "--parse-metadata", f"{today}:%(album)s",
         "--output", output_template,
-        "--ffmpeg-location", "/usr/bin/ffmpeg",
+        "--ffmpeg-location", FFMPEG_PATH,
     ]
-    if fmt == "wav":
-        # yt-dlp cannot embed into WAV: keep the cover and metadata as side files for _tag_wav_files
+    if fmt in PCM_FORMATS:
+        # yt-dlp cannot embed into WAV/AIFF: keep the cover and metadata as side files for _finalize_pcm_files
         cmd += ["--write-thumbnail", "--write-info-json"]
         if not square_cover:
             cmd += ["--convert-thumbnails", "jpg"]
@@ -235,11 +248,12 @@ def _first_value(info: dict, *keys: str) -> str:
     return ""
 
 
-def _tag_wav_files(session_dir: Path):
-    # Rekordbox reads a WAV's ID3 chunk instead of its RIFF INFO when both exist, so the ID3 tag
-    # mirrors every field ffmpeg wrote to RIFF INFO (same yt-dlp fallbacks), not only the cover.
+def _finalize_pcm_files(session_dir: Path, fmt: str):
+    # The ID3 tag mirrors every field ffmpeg wrote to RIFF INFO (same yt-dlp fallbacks) plus the cover.
+    # Rekordbox never shows artwork embedded in WAV, whatever the chunk layout; it does for AIFF.
     for wav_path in session_dir.glob("*.wav"):
         info = loads(wav_path.with_suffix(".info.json").read_text(encoding="utf-8"))
+        cover = next((c for c in (wav_path.with_suffix(".jpg"), wav_path.with_suffix(".png")) if c.exists()), None)
         upload_date = info.get("upload_date") or ""
         text_frames = (
             (TIT2, _first_value(info, "track", "title")),
@@ -249,7 +263,14 @@ def _tag_wav_files(session_dir: Path):
             (TDRC, f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}" if len(upload_date) == 8 else ""),
             (TRCK, _first_value(info, "track_number")),
         )
-        audio = WAVE(wav_path)
+        if fmt == "aiff":
+            aiff_path = wav_path.with_suffix(".aiff")
+            run([FFMPEG_PATH, "-loglevel", "error", "-i", str(wav_path), "-map", "0:a", "-c:a", "pcm_s16be", str(aiff_path)],
+                capture_output=True, check=True)
+            wav_path.unlink()
+            audio = AIFF(aiff_path)
+        else:
+            audio = WAVE(wav_path)
         if audio.tags is None:
             audio.add_tags()
         for frame_cls, value in text_frames:
@@ -257,15 +278,14 @@ def _tag_wav_files(session_dir: Path):
                 audio.tags.add(frame_cls(encoding=3, text=value))
         if info.get("webpage_url"):
             audio.tags.add(COMM(encoding=3, lang="eng", desc="", text=info["webpage_url"]))
-        cover = next((c for c in (wav_path.with_suffix(".jpg"), wav_path.with_suffix(".png")) if c.exists()), None)
         if cover:
             mime = "image/png" if cover.suffix == ".png" else "image/jpeg"
-            audio.tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover.read_bytes()))
+            audio.tags.add(APIC(encoding=0, mime=mime, type=3, desc="Cover", data=cover.read_bytes()))
         # Rekordbox is reliable with ID3v2.3; frames like TDRC must be converted, not just the header version
         audio.tags.update_to_v23()
         audio.save(v2_version=3)
     for side_file in session_dir.iterdir():
-        if side_file.suffix != ".wav":
+        if side_file.suffix != f".{fmt}":
             side_file.unlink()
 
 
@@ -342,7 +362,7 @@ def get_info():
         info = loads(result.stdout)
         return jsonify({
             "title": info.get("title", "Unknown"),
-            "uploader": info.get("uploader", info.get("artist", "Unknown")),
+            "uploader": (info.get("uploader") or info.get("artist") or "Unknown").removesuffix(TOPIC_SUFFIX),
             "duration": info.get("duration", 0),
             "thumbnail": info.get("thumbnail", ""),
             "description": (info.get("description") or "")[:300],
@@ -373,7 +393,7 @@ def download():
         dl_timeout = 600
         cmd = _build_ytdlp_video_cmd(output_template) + [url]
     else:
-        dl_timeout = 300 if fmt in ("flac", "wav") else 120
+        dl_timeout = 300 if fmt in ("flac", *PCM_FORMATS) else 120
         cmd = _build_ytdlp_cmd(fmt, output_template, square_cover=_is_youtube_url(url)) + [url]
 
     try:
@@ -381,8 +401,8 @@ def download():
         if result.returncode != 0:
             rmtree(session_dir, ignore_errors=True)
             return jsonify({"error": _ytdlp_error(result, "Download failed.")}), 400
-        if fmt == "wav":
-            _tag_wav_files(session_dir)
+        if fmt in PCM_FORMATS:
+            _finalize_pcm_files(session_dir, fmt)
 
         all_files = list(session_dir.glob("*.*"))
         logger.debug("Files in session dir: %s", [(f.name, f.stat().st_size) for f in all_files])
@@ -461,18 +481,18 @@ def download_playlist():
         dl_timeout = 3600
         cmd = _build_ytdlp_video_cmd(output_template, is_playlist=True) + [url]
     else:
-        dl_timeout = 1200 if fmt in ("flac", "wav") else 600
+        dl_timeout = 1200 if fmt in ("flac", *PCM_FORMATS) else 600
         cmd = _build_ytdlp_cmd(fmt, output_template, is_playlist=True, square_cover=_is_youtube_url(url)) + [url]
 
     try:
         result = _run_with_fallback(cmd, fmt, dl_timeout)
+        if fmt in PCM_FORMATS:
+            _finalize_pcm_files(session_dir, fmt)
         # yt-dlp skips unavailable entries but still exits non-zero; keep whatever did download
         files = list(session_dir.glob(f"*.{fmt}"))
         if not files:
             rmtree(session_dir, ignore_errors=True)
             return jsonify({"error": _ytdlp_error(result, "Playlist download failed.")}), 400
-        if fmt == "wav":
-            _tag_wav_files(session_dir)
 
         zip_base = str(DOWNLOAD_DIR / session_dir.name)
         make_archive(zip_base, "zip", session_dir)
