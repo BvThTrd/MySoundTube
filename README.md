@@ -145,8 +145,9 @@ TROUBLESHOOTING
 - **Geo-restricted** — Set `YTDLP_PROXY` to a proxy in a country where the track is available.
   Alternative: run the stack behind a VPN container such as gluetun
   (`network_mode: "service:gluetun"`)
-- **SoundCloud Go+ tracks** — Only a 30 s preview is public; no tool can fetch the full track
-  without a Go+ subscription
+- **SoundCloud Go+ tracks** — SoundCloud only serves free accounts a 30 s preview of these
+  (mostly major-label releases). The app refuses previews instead of delivering a 30 s file;
+  in a playlist these tracks are skipped and the rest is zipped
 
 
 PRIVATE PLAYLISTS

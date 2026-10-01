@@ -51,7 +51,13 @@ SQUARE_COVER_ARGS = [
     "--ppa", "ThumbnailsConvertor+FFmpeg_o:-qscale:v 2 -vf crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\"",
 ]
 
+# SoundCloud Go+ tracks only expose 30 s "preview" formats to free accounts; never deliver one as the track
+NO_PREVIEW = "[format_id!*=preview]"
+
 _ERROR_HINTS = (
+    (("requested format is not available",),
+     "If this is a SoundCloud track, it is Go+ only: SoundCloud serves free accounts just a 30-second preview."),
+    (("drm",), "The full stream is DRM-encrypted and cannot be downloaded."),
     (("country", "location", "geo"), "Geo-restricted: set YTDLP_PROXY to a proxy in an allowed country."),
     (("sign in", "private", "members-only", "join this channel"),
      "Needs a logged-in account: set YTDLP_COOKIES to a cookies.txt export "
@@ -201,7 +207,7 @@ def _build_ytdlp_cmd(fmt: str, output_template: str, is_playlist: bool = False, 
     cmd += [
         "--extract-audio",
         "--audio-format", fmt,
-        "-f", "ba",
+        "-f", f"ba{NO_PREVIEW}",
         "--audio-quality", "0",
         "--embed-metadata",
         "--parse-metadata", "%(uploader)s:%(artist)s",
@@ -267,15 +273,15 @@ def _run_with_fallback(cmd: list[str], fmt: str, timeout: int) -> CompletedProce
     result = _run_ytdlp(cmd, timeout)
     if result.returncode == 0:
         return result
-    # Retry without "-f ba" (e.g. SoundCloud HLS 404)
-    if "-f" in cmd and "ba" in cmd:
+    # Retry with any best format instead of audio-only (e.g. SoundCloud HLS 404), still excluding previews
+    if "-f" in cmd:
         idx = cmd.index("-f")
-        if cmd[idx + 1] == "ba":
-            no_format = cmd[:idx] + cmd[idx + 2:]
-            result = _run_ytdlp(no_format, timeout)
+        if cmd[idx + 1] == f"ba{NO_PREVIEW}":
+            any_format = cmd[:idx + 1] + [f"b{NO_PREVIEW}"] + cmd[idx + 2:]
+            result = _run_ytdlp(any_format, timeout)
             if result.returncode == 0:
                 return result
-            cmd = no_format
+            cmd = any_format
     # Last resort: strip embed-thumbnail / embed-metadata
     strip_flag = "--embed-thumbnail" if fmt in ("mp3", "m4a", "flac", "mp4") else "--embed-metadata"
     fallback = [c for c in cmd if c != strip_flag]
