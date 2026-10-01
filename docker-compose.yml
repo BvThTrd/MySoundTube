@@ -9,5 +9,11 @@ services:
       PYTHONUNBUFFERED: "1"
       APP_PASSWORD: ${APP_PASSWORD}
       PORT: ${PORT:-5000}
+      YTDLP_PROXY: ${YTDLP_PROXY:-}
+      YTDLP_COOKIES: ${YTDLP_COOKIES:-}
+    # Uncomment to give yt-dlp a logged-in YouTube session (private playlists, age/bot checks),
+    # then set YTDLP_COOKIES=/cookies/cookies.txt
+    # volumes:
+    #   - ./cookies.txt:/cookies/cookies.txt:ro
     tmpfs:
       - /tmp/mysoundtube-dl:size=2g,mode=1777

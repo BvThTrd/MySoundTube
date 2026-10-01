@@ -6,6 +6,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# yt-dlp needs a JS runtime (Deno by default) to solve YouTube's signature challenges;
+# without it most YouTube formats are missing and downloads fail.
+COPY --from=denoland/deno:bin /deno /usr/local/bin/deno
+
+# appuser has no home directory, so point the yt-dlp and Deno caches somewhere writable
+ENV XDG_CACHE_HOME=/tmp/.cache DENO_DIR=/tmp/.cache/deno
+
 # Create a non-root user to run the app
 RUN useradd --no-create-home --shell /bin/false appuser
 

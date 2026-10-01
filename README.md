@@ -67,6 +67,8 @@ ENVIRONMENT VARIABLES
 |               | In `.env` / `docker-compose`: escape every `$` as `$$`          |            |
 | `SECRET_KEY`  | Signs session cookies. Auto-generated if omitted — sessions reset on container restart. | (optional) |
 | `PORT`        | Host port exposed by the container.                              | `5000`     |
+| `YTDLP_PROXY` | Proxy for all yt-dlp traffic (`http://user:pass@host:8080`, `socks5://host:1080`). Use one located in a country where the content is available to get around geo-restrictions. | (optional) |
+| `YTDLP_COOKIES` | Path inside the container to a Netscape `cookies.txt` from a logged-in YouTube account. Needed for private playlists and "Sign in to confirm" errors. See below. | (optional) |
 
 
 FEATURES
@@ -95,7 +97,11 @@ Metadata embedded in every file
   - Title:  track/video title from the source platform
   - Artist: uploader name from the source platform
   - Album:  download date (`YYYYMMDD`)
-  - Cover:  thumbnail embedded (audio formats and MP4)
+  - Cover:  thumbnail embedded (audio formats and MP4). YouTube audio gets the
+            square album cover (as shown on YouTube Music) instead of the 16:9 frame
+            WAV: tags are written twice, as RIFF INFO and as an ID3v2.3 chunk holding
+            the same fields plus the cover. Rekordbox reads the ID3 chunk when present,
+            so it shows the cover. Already imported tracks: right-click, Reload Tag
 
 Filename format:  `Artist - Track Title.ext`
 Playlist files:   `01 - Artist - Track Title.ext`
@@ -132,3 +138,32 @@ TROUBLESHOOTING
 - **MP4 slow** — Normal, `yt-dlp` fetches separate video and audio streams then merges them
 - **Port conflict** — Set `PORT=8080` (or any free port) in `.env` or Portainer
 - **`$` sign in hash broken** — In `.env`, escape every `$` in the bcrypt hash as `$$`
+- **Error message** — The real yt-dlp error is shown in the UI, with a hint when it is a
+  geo-restriction or a login problem
+- **YouTube downloads failing / "formats missing"** — yt-dlp breaks whenever YouTube changes.
+  Rebuild without cache to pull the latest yt-dlp: `docker compose build --no-cache && docker compose up -d`
+- **Geo-restricted** — Set `YTDLP_PROXY` to a proxy in a country where the track is available.
+  Alternative: run the stack behind a VPN container such as gluetun
+  (`network_mode: "service:gluetun"`)
+- **SoundCloud Go+ tracks** — Only a 30 s preview is public; no tool can fetch the full track
+  without a Go+ subscription
+
+
+PRIVATE PLAYLISTS
+-----------------
+
+SoundCloud: private sets work with their secret share link, the one ending in `/s-XXXXXXXX`
+(Share -> copy the private link). The plain `/sets/name` URL fails for a private set.
+
+YouTube: private playlists (and Liked / Watch later) need a logged-in session.
+
+1. In a private browser window, log in to YouTube, then export cookies for youtube.com
+   in Netscape format (e.g. the "Get cookies.txt LOCALLY" extension) and close the window
+   without logging out (YouTube rotates cookies of open tabs).
+2. Save the file as `cookies.txt` next to `docker-compose.yml` (it is gitignored).
+3. In `docker-compose.yml`, uncomment the `volumes` block, and set
+   `YTDLP_COOKIES=/cookies/cookies.txt` in `.env` / Portainer.
+4. `docker compose up -d`
+
+Using a secondary Google account is safer: heavy downloading with cookies can get the
+account flagged.

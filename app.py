@@ -1,10 +1,10 @@
 from os import environ
 from re import sub
 from uuid import uuid4
-from subprocess import run, TimeoutExpired
+from subprocess import run, CompletedProcess, TimeoutExpired
 from json import loads
 from secrets import token_hex
-from shutil import rmtree, make_archive
+from shutil import rmtree, make_archive, copyfile
 from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -16,6 +16,8 @@ from flask import Flask, request, jsonify, render_template, session, redirect, u
 from bcrypt import checkpw
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from mutagen.id3 import APIC, COMM, TALB, TCON, TDRC, TIT2, TPE1, TRCK
+from mutagen.wave import WAVE
 
 app = Flask(__name__)
 app.secret_key = token_hex(32)
@@ -36,6 +38,25 @@ ALLOWED_SCHEMES = {"http", "https"}
 ALLOWED_HOSTS_SC = {"soundcloud.com", "www.soundcloud.com", "on.soundcloud.com", "m.soundcloud.com"}
 ALLOWED_HOSTS_YT = {"youtube.com", "www.youtube.com", "youtu.be", "m.youtube.com", "music.youtube.com"}
 ALLOWED_HOSTS = ALLOWED_HOSTS_SC | ALLOWED_HOSTS_YT
+
+YTDLP_PROXY = environ.get("YTDLP_PROXY", "").strip()
+YTDLP_COOKIES = Path(environ["YTDLP_COOKIES"]) if environ.get("YTDLP_COOKIES") else None
+if YTDLP_COOKIES and not YTDLP_COOKIES.is_file():
+    raise SystemExit(f"YTDLP_COOKIES points to {YTDLP_COOKIES}, which is not a file.")
+
+# YouTube thumbnails are 16:9 with the square album art centered; a center square crop recovers the cover.
+# The converter skips files already in the target format, so jpg maps to png to make sure the crop always runs.
+SQUARE_COVER_ARGS = [
+    "--convert-thumbnails", "webp>jpg/png>jpg/jpg>png",
+    "--ppa", "ThumbnailsConvertor+FFmpeg_o:-qscale:v 2 -vf crop=\"'if(gt(ih,iw),iw,ih)':'if(gt(iw,ih),ih,iw)'\"",
+]
+
+_ERROR_HINTS = (
+    (("country", "location", "geo"), "Geo-restricted: set YTDLP_PROXY to a proxy in an allowed country."),
+    (("sign in", "private", "members-only", "join this channel"),
+     "Needs a logged-in account: set YTDLP_COOKIES to a cookies.txt export "
+     "(for SoundCloud, use the private share link ending in /s-XXXX instead)."),
+)
 
 logger = logging.getLogger(__name__)
 limiter = Limiter(key_func=get_remote_address, app=app, default_limits=[])
@@ -130,8 +151,35 @@ def _is_youtube_url(url: str) -> bool:
         return False
 
 
-def _build_ytdlp_video_cmd(output_template: str, is_playlist: bool = False) -> list[str]:
+def _run_ytdlp(args: list[str], timeout: int) -> CompletedProcess:
     cmd = ["yt-dlp"]
+    if YTDLP_PROXY:
+        cmd += ["--proxy", YTDLP_PROXY]
+    if not YTDLP_COOKIES:
+        return run(cmd + args, capture_output=True, text=True, timeout=timeout)
+    # yt-dlp rewrites the cookie file on exit: give each concurrent run its own writable copy
+    cookie_copy = DOWNLOAD_DIR / f"cookies-{uuid4().hex}.txt"
+    copyfile(YTDLP_COOKIES, cookie_copy)
+    try:
+        return run(cmd + ["--cookies", str(cookie_copy)] + args, capture_output=True, text=True, timeout=timeout)
+    finally:
+        cookie_copy.unlink(missing_ok=True)
+
+
+def _ytdlp_error(result: CompletedProcess, fallback: str) -> str:
+    errors = [line.removeprefix("ERROR: ") for line in result.stderr.splitlines() if line.startswith("ERROR:")]
+    if not errors:
+        return fallback
+    message = errors[-1][:300]
+    lowered = message.lower()
+    for keywords, hint in _ERROR_HINTS:
+        if any(k in lowered for k in keywords):
+            return f"{message} -- {hint}"
+    return message
+
+
+def _build_ytdlp_video_cmd(output_template: str, is_playlist: bool = False) -> list[str]:
+    cmd = []
     if not is_playlist:
         cmd += ["--no-playlist"]
     cmd += [
@@ -145,9 +193,9 @@ def _build_ytdlp_video_cmd(output_template: str, is_playlist: bool = False) -> l
     return cmd
 
 
-def _build_ytdlp_cmd(fmt: str, output_template: str, is_playlist: bool = False) -> list[str]:
+def _build_ytdlp_cmd(fmt: str, output_template: str, is_playlist: bool = False, square_cover: bool = False) -> list[str]:
     today = date.today().strftime("%Y%m%d")
-    cmd = ["yt-dlp"]
+    cmd = []
     if not is_playlist:
         cmd += ["--no-playlist"]
     cmd += [
@@ -161,13 +209,62 @@ def _build_ytdlp_cmd(fmt: str, output_template: str, is_playlist: bool = False) 
         "--output", output_template,
         "--ffmpeg-location", "/usr/bin/ffmpeg",
     ]
-    if fmt in ("mp3", "m4a", "flac"):
+    if fmt == "wav":
+        # yt-dlp cannot embed into WAV: keep the cover and metadata as side files for _tag_wav_files
+        cmd += ["--write-thumbnail", "--write-info-json"]
+        if not square_cover:
+            cmd += ["--convert-thumbnails", "jpg"]
+    else:
         cmd.append("--embed-thumbnail")
+    if square_cover:
+        cmd += SQUARE_COVER_ARGS
     return cmd
 
 
-def _run_with_fallback(cmd: list[str], fmt: str, timeout: int):
-    result = run(cmd, capture_output=True, text=True, timeout=timeout)
+def _first_value(info: dict, *keys: str) -> str:
+    for key in keys:
+        value = info.get(key)
+        if value not in (None, "", []):
+            return ", ".join(map(str, value)) if isinstance(value, list) else str(value)
+    return ""
+
+
+def _tag_wav_files(session_dir: Path):
+    # Rekordbox reads a WAV's ID3 chunk instead of its RIFF INFO when both exist, so the ID3 tag
+    # mirrors every field ffmpeg wrote to RIFF INFO (same yt-dlp fallbacks), not only the cover.
+    for wav_path in session_dir.glob("*.wav"):
+        info = loads(wav_path.with_suffix(".info.json").read_text(encoding="utf-8"))
+        upload_date = info.get("upload_date") or ""
+        text_frames = (
+            (TIT2, _first_value(info, "track", "title")),
+            (TPE1, _first_value(info, "artist", "artists", "creator", "uploader")),
+            (TALB, _first_value(info, "album")),
+            (TCON, _first_value(info, "genre", "genres", "categories", "tags")),
+            (TDRC, f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}" if len(upload_date) == 8 else ""),
+            (TRCK, _first_value(info, "track_number")),
+        )
+        audio = WAVE(wav_path)
+        if audio.tags is None:
+            audio.add_tags()
+        for frame_cls, value in text_frames:
+            if value:
+                audio.tags.add(frame_cls(encoding=3, text=value))
+        if info.get("webpage_url"):
+            audio.tags.add(COMM(encoding=3, lang="eng", desc="", text=info["webpage_url"]))
+        cover = next((c for c in (wav_path.with_suffix(".jpg"), wav_path.with_suffix(".png")) if c.exists()), None)
+        if cover:
+            mime = "image/png" if cover.suffix == ".png" else "image/jpeg"
+            audio.tags.add(APIC(encoding=3, mime=mime, type=3, desc="Cover", data=cover.read_bytes()))
+        # Rekordbox is reliable with ID3v2.3; frames like TDRC must be converted, not just the header version
+        audio.tags.update_to_v23()
+        audio.save(v2_version=3)
+    for side_file in session_dir.iterdir():
+        if side_file.suffix != ".wav":
+            side_file.unlink()
+
+
+def _run_with_fallback(cmd: list[str], fmt: str, timeout: int) -> CompletedProcess:
+    result = _run_ytdlp(cmd, timeout)
     if result.returncode == 0:
         return result
     # Retry without "-f ba" (e.g. SoundCloud HLS 404)
@@ -175,14 +272,14 @@ def _run_with_fallback(cmd: list[str], fmt: str, timeout: int):
         idx = cmd.index("-f")
         if cmd[idx + 1] == "ba":
             no_format = cmd[:idx] + cmd[idx + 2:]
-            result = run(no_format, capture_output=True, text=True, timeout=timeout)
+            result = _run_ytdlp(no_format, timeout)
             if result.returncode == 0:
                 return result
             cmd = no_format
     # Last resort: strip embed-thumbnail / embed-metadata
     strip_flag = "--embed-thumbnail" if fmt in ("mp3", "m4a", "flac", "mp4") else "--embed-metadata"
     fallback = [c for c in cmd if c != strip_flag]
-    return run(fallback, capture_output=True, text=True, timeout=timeout)
+    return _run_ytdlp(fallback, timeout)
 
 
 def _register_token(filepath: Path, safe_name: str, mimetype: str, cleanup_fn: Callable) -> str:
@@ -232,12 +329,9 @@ def get_info():
         return jsonify({"error": "Invalid URL. Only SoundCloud and YouTube URLs are supported."}), 400
 
     try:
-        result = run(
-            ["yt-dlp", "--dump-json", "--no-playlist", url],
-            capture_output=True, text=True, timeout=30
-        )
+        result = _run_ytdlp(["--dump-json", "--no-playlist", url], 30)
         if result.returncode != 0:
-            return jsonify({"error": "Could not fetch track info. Check the URL."}), 400
+            return jsonify({"error": _ytdlp_error(result, "Could not fetch track info. Check the URL.")}), 400
 
         info = loads(result.stdout)
         return jsonify({
@@ -274,12 +368,15 @@ def download():
         cmd = _build_ytdlp_video_cmd(output_template) + [url]
     else:
         dl_timeout = 300 if fmt in ("flac", "wav") else 120
-        cmd = _build_ytdlp_cmd(fmt, output_template) + [url]
+        cmd = _build_ytdlp_cmd(fmt, output_template, square_cover=_is_youtube_url(url)) + [url]
 
     try:
         result = _run_with_fallback(cmd, fmt, dl_timeout)
         if result.returncode != 0:
-            return jsonify({"error": "Download failed. The track may be private or geo-restricted."}), 400
+            rmtree(session_dir, ignore_errors=True)
+            return jsonify({"error": _ytdlp_error(result, "Download failed.")}), 400
+        if fmt == "wav":
+            _tag_wav_files(session_dir)
 
         all_files = list(session_dir.glob("*.*"))
         logger.debug("Files in session dir: %s", [(f.name, f.stat().st_size) for f in all_files])
@@ -321,12 +418,9 @@ def playlist_info():
         return jsonify({"error": "Invalid URL. Only SoundCloud and YouTube URLs are supported."}), 400
 
     try:
-        result = run(
-            ["yt-dlp", "--flat-playlist", "--dump-single-json", url],
-            capture_output=True, text=True, timeout=60
-        )
+        result = _run_ytdlp(["--flat-playlist", "--dump-single-json", url], 60)
         if result.returncode != 0:
-            return jsonify({"error": "Could not fetch playlist info."}), 400
+            return jsonify({"error": _ytdlp_error(result, "Could not fetch playlist info.")}), 400
 
         info = loads(result.stdout)
         entries = info.get("entries") or []
@@ -362,16 +456,17 @@ def download_playlist():
         cmd = _build_ytdlp_video_cmd(output_template, is_playlist=True) + [url]
     else:
         dl_timeout = 1200 if fmt in ("flac", "wav") else 600
-        cmd = _build_ytdlp_cmd(fmt, output_template, is_playlist=True) + [url]
+        cmd = _build_ytdlp_cmd(fmt, output_template, is_playlist=True, square_cover=_is_youtube_url(url)) + [url]
 
     try:
         result = _run_with_fallback(cmd, fmt, dl_timeout)
-        if result.returncode != 0:
-            return jsonify({"error": "Download failed. The playlist may be private or geo-restricted."}), 400
-
-        files = list(session_dir.glob(f"*.{fmt}")) or list(session_dir.glob("*.*"))
+        # yt-dlp skips unavailable entries but still exits non-zero; keep whatever did download
+        files = list(session_dir.glob(f"*.{fmt}"))
         if not files:
-            return jsonify({"error": "Download produced no files."}), 500
+            rmtree(session_dir, ignore_errors=True)
+            return jsonify({"error": _ytdlp_error(result, "Playlist download failed.")}), 400
+        if fmt == "wav":
+            _tag_wav_files(session_dir)
 
         zip_base = str(DOWNLOAD_DIR / session_dir.name)
         make_archive(zip_base, "zip", session_dir)
