@@ -22,6 +22,12 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# YouTube breaks old yt-dlp releases within weeks, and Docker would keep reusing the cached layer above.
+# PyPI's release info changes with every yt-dlp release, which invalidates the cache from here on,
+# so a redeploy upgrades yt-dlp (and its matching YouTube challenge solver) as soon as one is out.
+ADD https://pypi.org/pypi/yt-dlp/json /tmp/yt-dlp-release.json
+RUN pip install --no-cache-dir --upgrade "yt-dlp[default,curl-cffi]" && rm /tmp/yt-dlp-release.json
+
 # Copy app source
 COPY app.py .
 COPY templates/ templates/

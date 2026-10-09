@@ -1,5 +1,5 @@
 from os import environ
-from re import sub
+from re import search, sub
 from uuid import uuid4
 from subprocess import run, CompletedProcess, TimeoutExpired
 from json import loads
@@ -69,9 +69,19 @@ STRIP_TOPIC_ARGS = ["--replace-in-metadata", "uploader,artist", f"{TOPIC_SUFFIX}
 # Debug output for the TRACES panel; without a TTY every progress update is a new line, so throttle them
 TRACE_ARGS = ["--verbose", "--progress-delta", "2"]
 
+# yt-dlp silently drops the YouTube streams it cannot unlock, then only reports "Requested format is not
+# available". The reasons sit in its WARNING and --verbose [debug] lines; these exact phrases only appear
+# when the matching problem happened (generic lines like "PO Token Providers: none" print on every run).
+_YOUTUBE_STREAM_SIGNALS = (
+    (("js runtimes: none", "no supported javascript runtime"), "no JavaScript runtime (Deno) was found"),
+    (("challenge solving failed",), "YouTube's JavaScript challenge could not be solved"),
+    (("formats require a gvs po token",), "YouTube asked for a PO token"),
+    (("forcing sabr streaming",), "YouTube withheld direct stream links (SABR)"),
+)
+
 _ERROR_HINTS = (
     (("requested format is not available",),
-     "If this is a SoundCloud track, it is Go+ only: SoundCloud serves free accounts just a 30-second preview."),
+     "This track is probably Go+ only: SoundCloud serves free accounts just a 30-second preview."),
     (("drm",), "The full stream is DRM-encrypted and cannot be downloaded."),
     (("country", "location", "geo"), "Geo-restricted: set YTDLP_PROXY to a proxy in an allowed country."),
     (("sign in", "private", "members-only", "join this channel"),
@@ -190,16 +200,29 @@ def _run_ytdlp(args: list[str], timeout: int) -> CompletedProcess:
         cookie_copy.unlink(missing_ok=True)
 
 
-def _ytdlp_error(result: CompletedProcess, fallback: str) -> str:
+def _ytdlp_error(result: CompletedProcess, fallback: str, url: str) -> str:
     errors = [line.removeprefix("ERROR: ") for line in result.stderr.splitlines() if line.startswith("ERROR:")]
     if not errors:
         return fallback
     message = errors[-1][:300]
     lowered = message.lower()
+    if _is_youtube_url(url) and "requested format is not available" in lowered:
+        return f"{message} -- {_youtube_no_stream_hint(result.stderr)}"
     for keywords, hint in _ERROR_HINTS:
         if any(k in lowered for k in keywords):
             return f"{message} -- {hint}"
     return message
+
+
+def _youtube_no_stream_hint(stderr: str) -> str:
+    lowered = stderr.lower()
+    signals = [label for phrases, label in _YOUTUBE_STREAM_SIGNALS if any(p in lowered for p in phrases)]
+    hint = "YouTube hid this video's streams" + (": " + "; ".join(signals) if signals else "")
+    version = search(r"yt-dlp version (\S+)", stderr)
+    hint += ". Rebuild the image to update yt-dlp" + (f" (running {version.group(1)})" if version else "")
+    if YTDLP_COOKIES:
+        hint += ". YTDLP_COOKIES is set: logged-in requests use other YouTube clients, try without it"
+    return hint + "."
 
 
 def _format_trace(attempts: list[CompletedProcess], footer: str = "") -> str:
@@ -385,7 +408,7 @@ def get_info():
     try:
         result = _run_ytdlp(["--dump-json", "--no-playlist", url], 30)
         if result.returncode != 0:
-            return jsonify({"error": _ytdlp_error(result, "Could not fetch track info. Check the URL.")}), 400
+            return jsonify({"error": _ytdlp_error(result, "Could not fetch track info. Check the URL.", url)}), 400
 
         info = loads(result.stdout)
         return jsonify({
@@ -436,7 +459,7 @@ def download():
     try:
         result = _run_with_fallback(cmd, fmt, dl_timeout, attempts)
         if result.returncode != 0:
-            return fail(_ytdlp_error(result, "Download failed."), 400)
+            return fail(_ytdlp_error(result, "Download failed.", url), 400)
         if fmt in PCM_FORMATS:
             _finalize_pcm_files(session_dir, fmt)
 
@@ -481,7 +504,7 @@ def playlist_info():
     try:
         result = _run_ytdlp(["--flat-playlist", "--dump-single-json", url], 60)
         if result.returncode != 0:
-            return jsonify({"error": _ytdlp_error(result, "Could not fetch playlist info.")}), 400
+            return jsonify({"error": _ytdlp_error(result, "Could not fetch playlist info.", url)}), 400
 
         info = loads(result.stdout)
         entries = info.get("entries") or []
@@ -538,7 +561,7 @@ def get_file(token):
         finally:
             threading.Timer(1.0, entry.cleanup).start()
 
-    # Header values must be latin-1: a raw "–" or emoji in the title made the server drop the connection.
+    # Header values must be latin-1: a raw en dash or emoji in the title made the server drop the connection.
     # RFC 6266: percent-encoded UTF-8 in filename*, plus an ASCII-only filename for old clients.
     # sanitize_filename already stripped the quote and backslash that could break out of filename="".
     ascii_name = entry.safe_name.encode("ascii", "ignore").decode()

@@ -145,7 +145,7 @@ async function _runTrack(job) {
   const { url, fmt, qid, playlistIndex } = job;
   _activeCount++;
   _syncBusy();
-  _setItemLive(qid, 'fetching', 'fetching…');
+  _setItemLive(qid, 'fetching', 'fetching...');
   await _showTrackInfo(job);
 
   // Playlist tracks report errors on their own row: one DRM track must not drown the global status
@@ -315,7 +315,7 @@ function _setTitle(item, text) {
 
 function dlAdd(url, fmt) {
   const id = ++_dlId;
-  _makeItem(id, _THUMB_PH, 'Loading…', '', 'fetching…', 'fetching', fmt, _detectPlatform(url));
+  _makeItem(id, _THUMB_PH, 'Loading...', '', 'fetching...', 'fetching', fmt, _detectPlatform(url));
   return id;
 }
 
@@ -336,7 +336,7 @@ function dlSetInfo(id, info) {
   if (info.uploader) parts.push(info.uploader);
   if (info.duration) parts.push(fmtDuration(info.duration));
   item.querySelector('.dl-meta').textContent = parts.join(' \xb7 ');
-  item.querySelector('.dl-badge').textContent = 'converting…';
+  item.querySelector('.dl-badge').textContent = 'converting...';
   if (info.thumbnail) {
     const img = document.createElement('img');
     img.src = info.thumbnail;
@@ -355,7 +355,7 @@ function dlSetFallback(id, label) {
   if (!item) return;
   item.className = 'dl-item downloading';
   _setTitle(item, label);
-  item.querySelector('.dl-badge').textContent = 'converting…';
+  item.querySelector('.dl-badge').textContent = 'converting...';
 }
 
 function dlUpdate(id, state) {
@@ -497,12 +497,12 @@ function loadPlaylistInfo(url) {
   }
   const { promise } = _playlist;
   _dom.playlistBar.hidden = false;
-  _dom.playlistLabel.textContent = 'loading playlist…';
+  _dom.playlistLabel.textContent = 'loading playlist...';
   promise.then(
     data => {
       if (!data || getURL() !== url) return;
       const n = data.track_count;
-      _dom.playlistLabel.textContent = `${data.title} — ${n} track${n !== 1 ? 's' : ''}`;
+      _dom.playlistLabel.textContent = `${data.title} - ${n} track${n !== 1 ? 's' : ''}`;
     },
     err => { if (getURL() === url) _dom.playlistLabel.textContent = err.message; }
   );
