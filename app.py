@@ -396,17 +396,16 @@ def index():
 
 @app.route("/info", methods=["POST"])
 @login_required
-@limiter.limit("60 per minute")
+@limiter.limit("120 per minute")
 def get_info():
-    data = request.get_json(silent=True) or {}
-    url = (data.get("url") or "").strip()
+    url, _, playlist_index = _parse_download_request()
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not _validate_url(url):
         return jsonify({"error": "Invalid URL. Only SoundCloud and YouTube URLs are supported."}), 400
 
     try:
-        result = _run_ytdlp(["--dump-json", "--no-playlist", url], 30)
+        result = _run_ytdlp(["--dump-json", *_playlist_args(playlist_index), url], 30)
         if result.returncode != 0:
             return jsonify({"error": _ytdlp_error(result, "Could not fetch track info. Check the URL.", url)}), 400
 
@@ -439,10 +438,7 @@ def download():
 
     session_dir = DOWNLOAD_DIR / uuid4().hex
     session_dir.mkdir(parents=True, exist_ok=True)
-    name_template = "%(uploader,artist)s - %(title)s.%(ext)s"
-    if playlist_index is not None:
-        name_template = "%(playlist_index)02d - " + name_template
-    output_template = str(session_dir / name_template)
+    output_template = str(session_dir / "%(uploader,artist)s - %(title)s.%(ext)s")
     if fmt == "mp4":
         dl_timeout = 600
         cmd = _build_ytdlp_video_cmd(output_template, playlist_index) + [url]

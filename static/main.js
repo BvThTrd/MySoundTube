@@ -121,20 +121,30 @@ function _setItemLive(qid, state, badge) {
   el.querySelector('.dl-spinner').hidden = false;
 }
 
+async function _fetchInfo(url, playlistIndex) {
+  const res = await guardedFetch('/info', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, playlist_index: playlistIndex })
+  });
+  const data = res && res.ok ? await res.json().catch(() => null) : null;
+  return data && !data.error ? data : null;
+}
+
 async function _showTrackInfo(job) {
   const { url, qid, playlistIndex, entry } = job;
   if (playlistIndex) {
     dlSetInfo(qid, entry);
+    // SoundCloud's playlist listing has no covers or titles: fetch this track's own info
+    // next to its download instead of before it. A missing cover is cosmetic, so failures are ignored.
+    if (!entry.thumbnail) {
+      _fetchInfo(url, playlistIndex).then(info => { if (info) dlSetMeta(qid, info); }).catch(() => {});
+    }
     return;
   }
   try {
-    const infoRes = await guardedFetch('/info', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url })
-    });
-    const data = infoRes && infoRes.ok ? await infoRes.json().catch(() => null) : null;
-    if (data && !data.error) dlSetInfo(qid, data);
+    const data = await _fetchInfo(url, null);
+    if (data) dlSetInfo(qid, data);
     else dlSetFallback(qid, _labelFromUrl(url));
   } catch {
     dlSetFallback(qid, _labelFromUrl(url));
@@ -331,12 +341,19 @@ function dlSetInfo(id, info) {
   const item = _getItem(id);
   if (!item) return;
   item.className = 'dl-item downloading';
+  item.querySelector('.dl-badge').textContent = 'converting...';
+  dlSetMeta(id, info);
+}
+
+// Title, artist, duration and cover only: safe to call in any state, even after the download is ready
+function dlSetMeta(id, info) {
+  const item = _getItem(id);
+  if (!item) return;
   _setTitle(item, info.title || 'Unknown');
   const parts = [];
   if (info.uploader) parts.push(info.uploader);
   if (info.duration) parts.push(fmtDuration(info.duration));
   item.querySelector('.dl-meta').textContent = parts.join(' \xb7 ');
-  item.querySelector('.dl-badge').textContent = 'converting...';
   if (info.thumbnail) {
     const img = document.createElement('img');
     img.src = info.thumbnail;

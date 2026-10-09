@@ -118,8 +118,7 @@ Metadata embedded in every file
             for lossless with a cover in Rekordbox, use AIFF
             AIFF: same uncompressed audio as WAV, ID3v2.3 tag with the cover
 
-Filename format:  `Artist - Track Title.ext`
-Playlist files:   `01 - Artist - Track Title.ext`
+Filename format:  `Artist - Track Title.ext` (playlist tracks too, no track number)
 
 
 HOW IT WORKS
