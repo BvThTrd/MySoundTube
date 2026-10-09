@@ -74,29 +74,38 @@ ENVIRONMENT VARIABLES
 FEATURES
 --------
 
+Interface
+  - Minimal monochrome UI; light or dark follows the device setting
+  - Press Enter in the link field to convert; the chosen format is remembered per browser
+  - Font self-hosted (JetBrains Mono, OFL): no request leaves for Google, the CSP stays strict
+  - Keyboard and screen-reader friendly, 44px touch targets on phones, reduced motion respected
+
 Single track
   - Paste any SoundCloud or YouTube track URL
-  - Auto-detects the platform and shows a badge (SoundCloud / YouTube)
-  - Preview: fetches title, artist, duration, and cover art
+  - Auto-detects the platform and shows a badge (soundcloud / youtube)
+  - Fetches title, artist, duration, and cover art for the queue row
   - Download as `MP3`, `M4A`, `FLAC`, `WAV`, or `AIFF`
   - YouTube only: download as `MP4` video (best video + audio, merged)
-    The MP4 format button appears automatically when a YouTube URL is detected
+    The MP4 format appears automatically when a YouTube URL is detected
 
 Playlist
   - Paste a SoundCloud `/sets/` URL or a YouTube playlist URL
-  - A banner shows the playlist name and track count
-  - "Convert All (one by one)" adds every track to the queue as its own job, each with
-    its own Download button: a track that fails (DRM, Go+, unavailable) shows its error
-    on its row and the others are not affected
+  - A banner shows the playlist name and track count, and the main button becomes
+    "convert all": every track joins the queue as its own job with its own Download
+    button. A track that fails (DRM, Go+, unavailable) shows its error on its row and
+    the others are not affected
+  - A YouTube `watch?v=...&list=...` link converts the one video; "convert all" in the
+    banner takes the whole list
   - `MP4` is available for YouTube playlists (one MP4 per video)
 
 Download queue
-  - Up to 5 downloads run concurrently
+  - Up to 5 downloads run concurrently; the waveform logo animates while any job runs
   - Additional jobs wait in a visual queue showing their position
-  - Queue drains automatically as slots free up
+  - Queue drains automatically as slots free up; "clear finished" removes downloaded
+    and failed rows
   - The terminal icon next to Download (TRACES) shows the yt-dlp debug output: every command
-    run (fallback retries included) with its `--verbose` stdout/stderr. Proxy credentials are
-    masked. Also available on failed jobs, to see why a track failed
+    run (fallback retries included) with its `--verbose` stdout/stderr, with a copy button.
+    Proxy credentials are masked. Also available on failed jobs, to see why a track failed
 
 Metadata embedded in every file
   - Title:  track/video title from the source platform

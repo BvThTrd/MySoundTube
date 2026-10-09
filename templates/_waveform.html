@@ -1,0 +1,5 @@
+<div class="waveform" aria-hidden="true">
+  {%- for h in [8, 14, 20, 28, 22, 16, 24, 30, 18, 12, 26, 20, 14, 22, 16, 10, 24, 20, 14, 18] %}
+  <span class="bar" style="--h:{{ h }}px;--i:{{ loop.index0 }}"></span>
+  {%- endfor %}
+</div>

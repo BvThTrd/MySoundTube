@@ -1,92 +1,86 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  {% include "_head.html" %}
   <title>MySoundTube</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css" />
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg viewBox='0 0 36 36' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Ccircle cx='18' cy='18' r='17' stroke='%23FF5500' stroke-width='1.5'/%3E%3Cpath d='M10 22 Q13 14 18 18 Q22 22 26 12' stroke='%23FF5500' stroke-width='1.8' stroke-linecap='round' fill='none'/%3E%3Ccircle cx='26' cy='12' r='2.5' fill='%23FF5500'/%3E%3C/svg%3E" />
 </head>
 <body>
-<div class="wrapper">
 
-  <header>
-    <div class="waveform" id="waveform"></div>
-    <div class="logo-line">
-      <div class="logo-icon">
-        <svg viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <defs>
-            <linearGradient id="logoGrad" x1="0%" y1="100%" x2="100%" y2="0%">
-              <stop offset="0%" stop-color="#FF5500"/>
-              <stop offset="100%" stop-color="#FF0000"/>
-            </linearGradient>
-          </defs>
-          <circle cx="18" cy="18" r="17" stroke="url(#logoGrad)" stroke-width="1.5"/>
-          <path d="M10 22 Q13 14 18 18 Q22 22 26 12" stroke="url(#logoGrad)" stroke-width="1.8" stroke-linecap="round" fill="none"/>
-          <circle cx="26" cy="12" r="2.5" fill="url(#logoGrad)"/>
-        </svg>
-      </div>
-      <h1>My<span>SoundTube</span></h1>
+<header class="topbar">
+  <a class="topbar-link" href="/logout">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>
+    <span>log out</span>
+  </a>
+</header>
+
+<main class="page">
+
+  <section class="hero">
+    {% include "_waveform.html" %}
+    <h1 class="wordmark"><span class="wordmark-dim">my</span>soundtube</h1>
+    <p class="tagline">soundcloud &amp; youtube to audio</p>
+  </section>
+
+  <form class="converter" id="convertForm" novalidate>
+    <div class="field-head">
+      <label class="field-label" for="urlInput">link</label>
+      <span class="platform-badge" id="platformBadge" hidden></span>
     </div>
-    <p class="tagline">SoundCloud & YouTube → Audio</p>
-  </header>
-
-  <div class="card">
-
-    <!-- FORMAT -->
-    <div class="format-row" id="fmtRow">
-      <button class="fmt-btn active" data-fmt="mp3">MP3</button>
-      <button class="fmt-btn" data-fmt="m4a">M4A</button>
-      <button class="fmt-btn" data-fmt="flac">FLAC</button>
-      <button class="fmt-btn" data-fmt="wav">WAV</button>
-      <button class="fmt-btn" data-fmt="aiff">AIFF</button>
-      <button class="fmt-btn" data-fmt="mp4" style="display:none">MP4</button>
-    </div>
-
-    <!-- URL INPUT -->
-    <div class="input-group">
-      <div class="label-row">
-        <label class="input-label" for="urlInput">URL</label>
-        <span id="platformBadge" class="platform-badge" style="display:none"></span>
-      </div>
+    <div class="field">
+      <svg class="field-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
       <input
-        class="url-input"
+        class="field-input"
         id="urlInput"
         type="url"
-        placeholder="https://soundcloud.com/… or https://youtube.com/…"
+        inputmode="url"
+        placeholder="soundcloud/youtube link"
         autocomplete="off"
+        autocapitalize="off"
         spellcheck="false"
+        aria-describedby="status"
       />
-      <button class="paste-btn" id="pasteBtn" title="Paste from clipboard">PASTE</button>
+      <button class="field-btn field-btn-collapse" id="pasteBtn" type="button" aria-label="Paste from clipboard">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="8" height="4" x="8" y="2" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg>
+        <span class="field-btn-text">paste</span>
+      </button>
     </div>
 
-    <!-- PLAYLIST BAR -->
-    <div class="playlist-bar" id="playlistBar">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
-        <path d="M3 6h18M3 12h18M3 18h12" stroke="#FF5500" stroke-width="2" stroke-linecap="round"/>
-      </svg>
-      <span id="playlistLabel">Loading playlist...</span>
+    <div class="controls">
+      <fieldset class="formats" id="fmtRow">
+        <legend class="sr-only">Output format</legend>
+        <label class="fmt"><input type="radio" name="format" value="mp3" checked /><span>mp3</span></label>
+        <label class="fmt"><input type="radio" name="format" value="m4a" /><span>m4a</span></label>
+        <label class="fmt"><input type="radio" name="format" value="flac" /><span>flac</span></label>
+        <label class="fmt"><input type="radio" name="format" value="wav" /><span>wav</span></label>
+        <label class="fmt"><input type="radio" name="format" value="aiff" /><span>aiff</span></label>
+        <label class="fmt" id="mp4Option" hidden><input type="radio" name="format" value="mp4" /><span>mp4</span></label>
+      </fieldset>
+      <button class="btn btn-primary" id="dlBtn" type="submit">
+        <span id="dlBtnLabel">convert</span>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+      </button>
     </div>
 
-    <!-- BUTTONS -->
-    <div class="btn-row">
-      <button class="btn btn-primary" id="dlBtn">Convert</button>
+    <div class="playlist-bar" id="playlistBar" hidden>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15V6"/><path d="M18.5 18a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/><path d="M12 12H3"/><path d="M16 6H3"/><path d="M12 18H3"/></svg>
+      <span class="playlist-label" id="playlistLabel">loading playlist…</span>
+      <button class="btn btn-secondary" id="dlAllBtn" type="button">convert all</button>
     </div>
-    <button class="btn btn-playlist" id="dlAllBtn" style="display:none">Convert All (one by one)</button>
 
-    <!-- STATUS -->
-    <div class="status" id="status"></div>
+    <div class="status" id="status" role="alert"></div>
+  </form>
 
-    <!-- DOWNLOAD QUEUE -->
+  <section class="queue" id="queueSection" aria-labelledby="queueTitle" hidden>
+    <div class="queue-head">
+      <h2 class="queue-title" id="queueTitle">queue <span class="queue-count" id="queueCount"></span></h2>
+      <button class="btn-ghost" id="clearBtn" type="button" hidden>clear finished</button>
+    </div>
     <div class="dl-queue" id="dlQueue"></div>
+  </section>
 
-  </div>
+</main>
 
-  <footer>Personal use only &mdash; respect artist rights &mdash; <a href="/logout" style="color:inherit;opacity:0.6;text-decoration:none">logout</a></footer>
-
-</div>
+<footer class="footer">personal use only &mdash; respect artist rights</footer>
 
 <script src="/static/main.js"></script>
 </body>
