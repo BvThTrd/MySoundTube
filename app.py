@@ -4,12 +4,14 @@ from uuid import uuid4
 from subprocess import run, CompletedProcess, TimeoutExpired
 from json import loads
 from secrets import token_hex
-from shutil import rmtree, make_archive, copyfile
+from shutil import rmtree, copyfile
+from shlex import join as shell_join
+from traceback import format_exc
 from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
 from typing import Callable, NamedTuple
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 import logging
 import threading
 from flask import Flask, request, jsonify, render_template, session, redirect, url_for, Response, stream_with_context
@@ -63,6 +65,9 @@ NO_PREVIEW = "[format_id!*=preview]"
 # YouTube's auto-generated artist channels are named "<Artist> - Topic"
 TOPIC_SUFFIX = " - Topic"
 STRIP_TOPIC_ARGS = ["--replace-in-metadata", "uploader,artist", f"{TOPIC_SUFFIX}$", ""]
+
+# Debug output for the TRACES panel; without a TTY every progress update is a new line, so throttle them
+TRACE_ARGS = ["--verbose", "--progress-delta", "2"]
 
 _ERROR_HINTS = (
     (("requested format is not available",),
@@ -151,13 +156,16 @@ def sanitize_filename(name: str) -> str:
     return name[:180]
 
 
-def _parse_download_request() -> tuple[str, str]:
+def _parse_download_request() -> tuple[str, str, int | None]:
     data = request.get_json(silent=True) or {}
     url = (data.get("url") or "").strip()
     fmt = (data.get("format") or "mp3").strip().lower()
     if fmt not in VALID_FORMATS:
         fmt = "mp3"
-    return url, fmt
+    playlist_index = data.get("playlist_index")
+    if not (isinstance(playlist_index, int) and playlist_index >= 1):
+        playlist_index = None
+    return url, fmt, playlist_index
 
 
 def _is_youtube_url(url: str) -> bool:
@@ -194,10 +202,26 @@ def _ytdlp_error(result: CompletedProcess, fallback: str) -> str:
     return message
 
 
-def _build_ytdlp_video_cmd(output_template: str, is_playlist: bool = False) -> list[str]:
-    cmd = []
-    if not is_playlist:
-        cmd += ["--no-playlist"]
+def _format_trace(attempts: list[CompletedProcess], footer: str = "") -> str:
+    blocks = [
+        f"=== Attempt {i}/{len(attempts)} - exit code {r.returncode} ===\n"
+        f"$ {shell_join(r.args)}\n\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+        for i, r in enumerate(attempts, 1)
+    ]
+    if footer:
+        blocks.append(footer)
+    # --verbose echoes the command line and the proxy map: hide the user:pass@ of any URL
+    return sub(r"(\w+://)[^\s/@]+@", r"\1<redacted>@", "\n\n".join(blocks))
+
+
+def _playlist_args(playlist_index: int | None) -> list[str]:
+    if playlist_index is None:
+        return ["--no-playlist"]
+    return ["--playlist-items", str(playlist_index)]
+
+
+def _build_ytdlp_video_cmd(output_template: str, playlist_index: int | None = None) -> list[str]:
+    cmd = [*TRACE_ARGS, *_playlist_args(playlist_index)]
     cmd += [
         "-f", "bv*+ba/b",
         *STRIP_TOPIC_ARGS,
@@ -210,11 +234,10 @@ def _build_ytdlp_video_cmd(output_template: str, is_playlist: bool = False) -> l
     return cmd
 
 
-def _build_ytdlp_cmd(fmt: str, output_template: str, is_playlist: bool = False, square_cover: bool = False) -> list[str]:
+def _build_ytdlp_cmd(fmt: str, output_template: str, playlist_index: int | None = None,
+                     square_cover: bool = False) -> list[str]:
     today = date.today().strftime("%Y%m%d")
-    cmd = []
-    if not is_playlist:
-        cmd += ["--no-playlist"]
+    cmd = [*TRACE_ARGS, *_playlist_args(playlist_index)]
     cmd += [
         "--extract-audio",
         # yt-dlp has no AIFF output: download WAV, _finalize_pcm_files converts it
@@ -289,8 +312,14 @@ def _finalize_pcm_files(session_dir: Path, fmt: str):
             side_file.unlink()
 
 
-def _run_with_fallback(cmd: list[str], fmt: str, timeout: int) -> CompletedProcess:
-    result = _run_ytdlp(cmd, timeout)
+def _run_with_fallback(cmd: list[str], fmt: str, timeout: int, attempts: list[CompletedProcess]) -> CompletedProcess:
+    # attempts is filled in place so the caller keeps the runs for the trace even if a later one times out
+    def attempt(args: list[str]) -> CompletedProcess:
+        result = _run_ytdlp(args, timeout)
+        attempts.append(result)
+        return result
+
+    result = attempt(cmd)
     if result.returncode == 0:
         return result
     # Retry with any best format instead of audio-only (e.g. SoundCloud HLS 404), still excluding previews
@@ -298,14 +327,13 @@ def _run_with_fallback(cmd: list[str], fmt: str, timeout: int) -> CompletedProce
         idx = cmd.index("-f")
         if cmd[idx + 1] == f"ba{NO_PREVIEW}":
             any_format = cmd[:idx + 1] + [f"b{NO_PREVIEW}"] + cmd[idx + 2:]
-            result = _run_ytdlp(any_format, timeout)
+            result = attempt(any_format)
             if result.returncode == 0:
                 return result
             cmd = any_format
     # Last resort: strip embed-thumbnail / embed-metadata
     strip_flag = "--embed-thumbnail" if fmt in ("mp3", "m4a", "flac", "mp4") else "--embed-metadata"
-    fallback = [c for c in cmd if c != strip_flag]
-    return _run_ytdlp(fallback, timeout)
+    return attempt([c for c in cmd if c != strip_flag])
 
 
 def _register_token(filepath: Path, safe_name: str, mimetype: str, cleanup_fn: Callable) -> str:
@@ -376,9 +404,9 @@ def get_info():
 
 @app.route("/download", methods=["POST"])
 @login_required
-@limiter.limit("20 per minute")
+@limiter.limit("60 per minute")
 def download():
-    url, fmt = _parse_download_request()
+    url, fmt, playlist_index = _parse_download_request()
     if not url:
         return jsonify({"error": "No URL provided"}), 400
     if not _validate_url(url):
@@ -388,19 +416,27 @@ def download():
 
     session_dir = DOWNLOAD_DIR / uuid4().hex
     session_dir.mkdir(parents=True, exist_ok=True)
-    output_template = str(session_dir / "%(uploader,artist)s - %(title)s.%(ext)s")
+    name_template = "%(uploader,artist)s - %(title)s.%(ext)s"
+    if playlist_index is not None:
+        name_template = "%(playlist_index)02d - " + name_template
+    output_template = str(session_dir / name_template)
     if fmt == "mp4":
         dl_timeout = 600
-        cmd = _build_ytdlp_video_cmd(output_template) + [url]
+        cmd = _build_ytdlp_video_cmd(output_template, playlist_index) + [url]
     else:
         dl_timeout = 300 if fmt in ("flac", *PCM_FORMATS) else 120
-        cmd = _build_ytdlp_cmd(fmt, output_template, square_cover=_is_youtube_url(url)) + [url]
+        cmd = _build_ytdlp_cmd(fmt, output_template, playlist_index, square_cover=_is_youtube_url(url)) + [url]
+
+    attempts: list[CompletedProcess] = []
+
+    def fail(message: str, status: int, footer: str = ""):
+        rmtree(session_dir, ignore_errors=True)
+        return jsonify({"error": message, "trace": _format_trace(attempts, footer)}), status
 
     try:
-        result = _run_with_fallback(cmd, fmt, dl_timeout)
+        result = _run_with_fallback(cmd, fmt, dl_timeout, attempts)
         if result.returncode != 0:
-            rmtree(session_dir, ignore_errors=True)
-            return jsonify({"error": _ytdlp_error(result, "Download failed.")}), 400
+            return fail(_ytdlp_error(result, "Download failed."), 400)
         if fmt in PCM_FORMATS:
             _finalize_pcm_files(session_dir, fmt)
 
@@ -410,26 +446,25 @@ def download():
         if not files:
             files = [f for f in all_files if f.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp", ".part")]
         if not files:
-            return jsonify({"error": "Download produced no file."}), 500
+            return fail("Download produced no file.", 500)
 
         filepath = max(files, key=lambda f: f.stat().st_size)
         if filepath.stat().st_size == 0:
-            return jsonify({"error": "Conversion produced an empty file."}), 500
+            return fail("Conversion produced an empty file.", 500)
 
         safe_name = sanitize_filename(filepath.stem) + filepath.suffix
         token = _register_token(
             filepath, safe_name, MIME_MAP.get(fmt, "application/octet-stream"),
             lambda: rmtree(session_dir, ignore_errors=True)
         )
-        return jsonify({"token": token, "filename": safe_name})
+        return jsonify({"token": token, "filename": safe_name, "trace": _format_trace(attempts)})
 
-    except TimeoutExpired:
-        rmtree(session_dir, ignore_errors=True)
-        return jsonify({"error": "Download timed out. Track may be too long or connection is slow."}), 408
+    except TimeoutExpired as exc:
+        return fail("Download timed out. Track may be too long or connection is slow.", 408,
+                    f"=== Timed out after {exc.timeout}s ===\n$ {shell_join(exc.cmd)}")
     except Exception:
-        rmtree(session_dir, ignore_errors=True)
         logger.exception("Unexpected error in /download")
-        return jsonify({"error": "An internal error occurred."}), 500
+        return fail("An internal error occurred.", 500, f"=== Python exception ===\n{format_exc()}")
 
 
 @app.route("/playlist-info", methods=["POST"])
@@ -454,62 +489,21 @@ def playlist_info():
             "title": info.get("title", "Playlist"),
             "track_count": len(entries),
             "uploader": info.get("uploader", info.get("channel", "")),
+            # SoundCloud flat entries carry only a URL, so title and the rest may be empty
+            "entries": [
+                {
+                    "title": e.get("title") or "",
+                    "uploader": (e.get("uploader") or e.get("channel") or "").removesuffix(TOPIC_SUFFIX),
+                    "duration": e.get("duration") or 0,
+                    "thumbnail": (e.get("thumbnails") or [{}])[-1].get("url", ""),
+                }
+                for e in entries
+            ],
         })
     except TimeoutExpired:
         return jsonify({"error": "Request timed out."}), 408
     except Exception:
         logger.exception("Unexpected error in /playlist-info")
-        return jsonify({"error": "An internal error occurred."}), 500
-
-
-@app.route("/download-playlist", methods=["POST"])
-@login_required
-@limiter.limit("5 per minute")
-def download_playlist():
-    url, fmt = _parse_download_request()
-    if not url:
-        return jsonify({"error": "No URL provided"}), 400
-    if not _validate_url(url):
-        return jsonify({"error": "Invalid URL. Only SoundCloud and YouTube URLs are supported."}), 400
-    if fmt == "mp4" and not _is_youtube_url(url):
-        return jsonify({"error": "MP4 video download is only available for YouTube URLs."}), 400
-
-    session_dir = DOWNLOAD_DIR / uuid4().hex
-    session_dir.mkdir(parents=True, exist_ok=True)
-    output_template = str(session_dir / "%(playlist_index)02d - %(uploader,artist)s - %(title)s.%(ext)s")
-    if fmt == "mp4":
-        dl_timeout = 3600
-        cmd = _build_ytdlp_video_cmd(output_template, is_playlist=True) + [url]
-    else:
-        dl_timeout = 1200 if fmt in ("flac", *PCM_FORMATS) else 600
-        cmd = _build_ytdlp_cmd(fmt, output_template, is_playlist=True, square_cover=_is_youtube_url(url)) + [url]
-
-    try:
-        result = _run_with_fallback(cmd, fmt, dl_timeout)
-        if fmt in PCM_FORMATS:
-            _finalize_pcm_files(session_dir, fmt)
-        # yt-dlp skips unavailable entries but still exits non-zero; keep whatever did download
-        files = list(session_dir.glob(f"*.{fmt}"))
-        if not files:
-            rmtree(session_dir, ignore_errors=True)
-            return jsonify({"error": _ytdlp_error(result, "Playlist download failed.")}), 400
-
-        zip_base = str(DOWNLOAD_DIR / session_dir.name)
-        make_archive(zip_base, "zip", session_dir)
-        zip_path = Path(zip_base + ".zip")
-
-        token = _register_token(
-            zip_path, "playlist.zip", "application/zip",
-            lambda: (rmtree(session_dir, ignore_errors=True), zip_path.unlink(missing_ok=True))
-        )
-        return jsonify({"token": token, "filename": "playlist.zip"})
-
-    except TimeoutExpired:
-        rmtree(session_dir, ignore_errors=True)
-        return jsonify({"error": "Download timed out. Playlist may be too large."}), 408
-    except Exception:
-        rmtree(session_dir, ignore_errors=True)
-        logger.exception("Unexpected error in /download-playlist")
         return jsonify({"error": "An internal error occurred."}), 500
 
 
@@ -544,12 +538,15 @@ def get_file(token):
         finally:
             threading.Timer(1.0, entry.cleanup).start()
 
-    # RFC 6266: filename* with UTF-8 encoding avoids header injection via special chars
+    # Header values must be latin-1: a raw "–" or emoji in the title made the server drop the connection.
+    # RFC 6266: percent-encoded UTF-8 in filename*, plus an ASCII-only filename for old clients.
+    # sanitize_filename already stripped the quote and backslash that could break out of filename="".
+    ascii_name = entry.safe_name.encode("ascii", "ignore").decode()
     return Response(
         stream_with_context(generate()),
         mimetype=entry.mimetype,
         headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{entry.safe_name}",
+            "Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(entry.safe_name)}",
             "Content-Length": str(file_size),
             "Cache-Control": "no-cache, no-store, must-revalidate",
         },

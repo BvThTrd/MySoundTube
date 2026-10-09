@@ -385,6 +385,7 @@ h1 span {
 
 .dl-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
@@ -511,6 +512,48 @@ h1 span {
   transition: background 0.15s;
 }
 .dl-download-btn:hover { background: rgba(46,204,113,0.22); }
+
+.dl-actions { display: flex; align-items: center; gap: 6px; }
+
+.dl-trace-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 3px 5px;
+  border-radius: 3px;
+  background: none;
+  border: 1px solid var(--border-hi);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.dl-trace-btn:hover,
+.dl-trace-btn.active { color: var(--accent); border-color: var(--accent); }
+
+.dl-error {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  color: var(--error);
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dl-trace {
+  flex-basis: 100%;
+  max-height: 320px;
+  overflow: auto;
+  margin: 2px 0 0;
+  padding: 10px;
+  background: #05070A;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 
 /* dismiss button */
 .dl-item-close {

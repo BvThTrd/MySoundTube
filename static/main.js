@@ -17,6 +17,10 @@ const _dom = {
 const _SVG_CHECK =
   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none">' +
   '<path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const _SVG_TRACES =
+  '<svg width="14" height="14" viewBox="0 0 24 24" fill="none">' +
+  '<rect x="3" y="4" width="18" height="16" rx="2" stroke="currentColor" stroke-width="1.8"/>' +
+  '<path d="M7 9l3 3-3 3M12 15h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const _SVG_X =
   '<svg width="14" height="14" viewBox="0 0 24 24" fill="none">' +
   '<path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>';
@@ -68,7 +72,7 @@ function _updateMp4Availability(platform) {
 // -- CONCURRENCY POOL --
 const MAX_CONCURRENT = 5;
 let _activeCount = 0;
-const _pending = []; // { type:'track'|'playlist', url, fmt, qid }
+const _pending = []; // { url, fmt, qid, playlistIndex, entry }
 
 function _getItem(id) {
   return document.querySelector('[data-dlid="' + id + '"]');
@@ -87,8 +91,7 @@ function _onJobFinish(qid, state) {
   if (_pending.length > 0) {
     const job = _pending.shift();
     _updatePendingBadges();
-    if (job.type === 'track') _runTrack(job.url, job.fmt, job.qid);
-    else _runPlaylist(job.url, job.fmt, job.qid);
+    _runTrack(job);
   }
 }
 
@@ -100,10 +103,12 @@ function _setItemLive(qid, state, badge) {
   el.querySelector('.dl-spinner').style.display = '';
 }
 
-async function _runTrack(url, fmt, qid) {
-  _activeCount++;
-  _setItemLive(qid, 'fetching', 'Fetching…');
-
+async function _showTrackInfo(job) {
+  const { url, qid, playlistIndex, entry } = job;
+  if (playlistIndex) {
+    dlSetInfo(qid, entry);
+    return;
+  }
   try {
     const infoRes = await guardedFetch('/info', {
       method: 'POST',
@@ -116,71 +121,64 @@ async function _runTrack(url, fmt, qid) {
   } catch {
     dlSetFallback(qid, _labelFromUrl(url));
   }
+}
+
+async function _runTrack(job) {
+  const { url, fmt, qid, playlistIndex } = job;
+  _activeCount++;
+  _setItemLive(qid, 'fetching', 'Fetching…');
+  await _showTrackInfo(job);
+
+  // Playlist tracks report errors on their own row: one DRM track must not drown the global status
+  const fail = (msg) => {
+    dlSetError(qid, msg);
+    if (!playlistIndex) setStatus(msg, 'error');
+    _onJobFinish(qid, 'error');
+  };
 
   try {
     const res = await guardedFetch('/download', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, format: fmt })
+      body: JSON.stringify({ url, format: fmt, playlist_index: playlistIndex })
     });
     if (!res) { _onJobFinish(qid, 'error'); return; }
     const data = await res.json().catch(() => ({}));
+    if (data.trace) dlSetTrace(qid, data.trace);
     if (!res.ok || data.error) {
-      setStatus(data.error || 'Download failed.', 'error');
-      _onJobFinish(qid, 'error');
+      fail(data.error || 'Download failed (HTTP ' + res.status + ').');
       return;
     }
     dlSetReady(qid, data.token, data.filename);
     _onJobFinish(qid, null);
   } catch (err) {
-    setStatus('Network error: ' + err.message, 'error');
-    _onJobFinish(qid, 'error');
+    fail('Network error: ' + err.message);
   }
 }
 
-async function _runPlaylist(url, fmt, qid) {
-  _activeCount++;
-  _setItemLive(qid, 'downloading', 'Converting…');
-
-  try {
-    const res = await guardedFetch('/download-playlist', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, format: fmt })
-    });
-    if (!res) { _onJobFinish(qid, 'error'); return; }
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.error) {
-      setStatus(data.error || 'Playlist download failed.', 'error');
-      _onJobFinish(qid, 'error');
-      return;
-    }
-    dlSetReady(qid, data.token, data.filename);
-    _onJobFinish(qid, null);
-  } catch (err) {
-    setStatus('Network error: ' + err.message, 'error');
-    _onJobFinish(qid, 'error');
+function _schedule(job) {
+  if (_activeCount < MAX_CONCURRENT) {
+    _runTrack(job);
+  } else {
+    _pending.push(job);
+    dlSetQueued(job.qid, _pending.length);
   }
 }
 
 function enqueueTrack(url, fmt) {
-  const qid = dlAdd(url, fmt);
-  if (_activeCount < MAX_CONCURRENT) {
-    _runTrack(url, fmt, qid);
-  } else {
-    _pending.push({ type: 'track', url, fmt, qid });
-    dlSetQueued(qid, _pending.length);
-  }
+  _schedule({ url, fmt, qid: dlAdd(url, fmt), playlistIndex: null, entry: null });
 }
 
-function enqueuePlaylist(url, fmt, title, meta) {
-  const qid = dlAddPlaylist(url, title, meta, fmt);
-  if (_activeCount < MAX_CONCURRENT) {
-    _runPlaylist(url, fmt, qid);
-  } else {
-    _pending.push({ type: 'playlist', url, fmt, qid });
-    dlSetQueued(qid, _pending.length);
+function enqueuePlaylist(url, fmt, entries) {
+  // Rows stack newest first: create them from the last track so track 1 is on top, then run them in order
+  const jobs = [];
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = { ...entries[i], title: entries[i].title || 'Track ' + (i + 1) };
+    const qid = dlAdd(url, fmt);
+    dlSetInfo(qid, entry);
+    jobs[i] = { url, fmt, qid, playlistIndex: i + 1, entry };
   }
+  jobs.forEach(job => _schedule(job));
 }
 
 // -- DOWNLOAD QUEUE UI --
@@ -221,14 +219,27 @@ function _makeItem(id, thumbContent, title, meta, badge, state, fmt, platform) {
         _platformQueueBadge(platform) +
         (fmt ? '<span class="dl-fmt' + (platform ? ' ' + platform : '') + '">' + _esc(fmt.toUpperCase()) + '</span>' : '') +
       '</div>' +
+      '<div class="dl-error" style="display:none"></div>' +
     '</div>' +
     '<div class="dl-status-col">' +
       '<div class="dl-spinner"></div>' +
       '<div class="dl-item-icon" style="display:none"></div>' +
       '<div class="dl-badge">' + badge + '</div>' +
-      '<a class="dl-download-btn" style="display:none" target="_blank">Download</a>' +
+      '<div class="dl-actions">' +
+        '<a class="dl-download-btn" style="display:none" target="_blank">Download</a>' +
+        '<button class="dl-trace-btn" style="display:none" title="yt-dlp traces (debug)">' + _SVG_TRACES + '</button>' +
+      '</div>' +
     '</div>' +
-    '<button class="dl-item-close" title="Dismiss">\xd7</button>';
+    '<button class="dl-item-close" title="Dismiss">\xd7</button>' +
+    '<pre class="dl-trace" style="display:none"></pre>';
+
+  const traceBtn = item.querySelector('.dl-trace-btn');
+  traceBtn.addEventListener('click', () => {
+    const pre = item.querySelector('.dl-trace');
+    const open = pre.style.display === 'none';
+    pre.style.display = open ? '' : 'none';
+    traceBtn.classList.toggle('active', open);
+  });
 
   item.querySelector('.dl-item-close').addEventListener('click', () => {
     const idx = _pending.findIndex(j => j.qid === id);
@@ -248,15 +259,6 @@ function _makeItem(id, thumbContent, title, meta, badge, state, fmt, platform) {
 function dlAdd(url, fmt) {
   const id = ++_dlId;
   _makeItem(id, _THUMB_PH, 'Loading…', '', 'Fetching…', 'fetching', fmt, _detectPlatform(url));
-  return id;
-}
-
-function dlAddPlaylist(url, title, meta, fmt) {
-  const id = ++_dlId;
-  const thumbSvg =
-    '<svg width="18" height="18" viewBox="0 0 24 24" fill="none">' +
-    '<path d="M3 6h18M3 12h18M3 18h12" stroke="#FF5500" stroke-width="2" stroke-linecap="round"/></svg>';
-  _makeItem(id, thumbSvg, title, meta, 'Converting…', 'downloading', fmt, _detectPlatform(url));
   return id;
 }
 
@@ -307,9 +309,28 @@ function dlUpdate(id, state) {
   icon.innerHTML = state === 'done' ? _SVG_CHECK : _SVG_X;
 }
 
+function dlSetError(id, message) {
+  const item = _getItem(id);
+  if (!item) return;
+  const el = item.querySelector('.dl-error');
+  el.textContent = message;
+  el.title = message;
+  el.style.display = '';
+}
+
+function dlSetTrace(id, trace) {
+  const item = _getItem(id);
+  if (!item) return;
+  item.querySelector('.dl-trace').textContent = trace;
+  item.querySelector('.dl-trace-btn').style.display = '';
+}
+
 function dlSetReady(id, token, filename) {
   const item = _getItem(id);
   if (!item) return;
+  // SoundCloud playlist entries have no title until yt-dlp names the file
+  const title = item.querySelector('.dl-title');
+  if (/^Track \d+$/.test(title.textContent)) title.textContent = filename.replace(/\.[^.]+$/, '');
   item.className = 'dl-item ready';
   item.querySelector('.dl-spinner').style.display = 'none';
   item.querySelector('.dl-item-icon').style.display = 'none';
@@ -419,27 +440,39 @@ function isPlaylistURL(url) {
 }
 
 let _playlistInfoTimer = null;
+let _playlist = null; // { url, promise } of the last /playlist-info request
 
-async function fetchPlaylistInfo(url) {
+async function _fetchPlaylistInfo(url) {
+  const res = await guardedFetch('/playlist-info', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url })
+  });
+  if (!res) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) throw new Error(data.error || 'Could not load the playlist.');
+  return data;
+}
+
+function loadPlaylistInfo(url) {
+  if (!_playlist || _playlist.url !== url) {
+    const promise = _fetchPlaylistInfo(url);
+    _playlist = { url, promise };
+    // A failed load must not stay cached: the next attempt retries
+    promise.catch(() => { if (_playlist && _playlist.promise === promise) _playlist = null; });
+  }
+  const { promise } = _playlist;
   _dom.playlistBar.classList.add('visible');
   _dom.playlistLabel.textContent = 'Loading playlist info...';
-  try {
-    const res = await guardedFetch('/playlist-info', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url })
-    });
-    if (!res) return;
-    const data = await res.json();
-    if (!res.ok || data.error) {
-      _dom.playlistLabel.textContent = 'Playlist detected';
-      return;
-    }
-    const n = data.track_count;
-    _dom.playlistLabel.textContent = `${data.title} — ${n} track${n !== 1 ? 's' : ''}`;
-  } catch {
-    _dom.playlistLabel.textContent = 'Playlist detected';
-  }
+  promise.then(
+    data => {
+      if (!data || getURL() !== url) return;
+      const n = data.track_count;
+      _dom.playlistLabel.textContent = `${data.title} — ${n} track${n !== 1 ? 's' : ''}`;
+    },
+    err => { if (getURL() === url) _dom.playlistLabel.textContent = err.message; }
+  );
+  return promise;
 }
 
 // -- URL INPUT + PLAYLIST DETECTION --
@@ -450,24 +483,31 @@ _dom.urlInput.addEventListener('input', () => {
   if (isPlaylistURL(v)) {
     _dom.dlAllBtn.style.display = '';
     clearTimeout(_playlistInfoTimer);
-    _playlistInfoTimer = setTimeout(() => fetchPlaylistInfo(v), 400);
+    _playlistInfoTimer = setTimeout(() => loadPlaylistInfo(v), 400);
   } else {
     _dom.playlistBar.classList.remove('visible');
     _dom.dlAllBtn.style.display = 'none';
   }
 });
 
-// -- DOWNLOAD ALL (playlist) --
-_dom.dlAllBtn.addEventListener('click', () => {
+// -- CONVERT ALL (playlist) --
+_dom.dlAllBtn.addEventListener('click', async () => {
   const url = getURL();
   if (!url) { setStatus('Paste a SoundCloud or YouTube playlist URL first.', 'error'); return; }
   clearStatus();
-
-  const labelText = _dom.playlistLabel.textContent;
-  const countMatch = labelText.match(/(\d+)\s+track/);
-  const count = countMatch ? parseInt(countMatch[1]) : 0;
-  const plTitle = labelText.replace(/\s*—.*$/, '').trim() || 'Playlist';
-  const plMeta = 'Playlist\xb7' + (count ? count + ' tracks\xb7' : '') + 'ZIP';
-
-  enqueuePlaylist(url, selectedFormat, plTitle, plMeta);
+  clearTimeout(_playlistInfoTimer);
+  const fmt = selectedFormat;
+  _dom.dlAllBtn.disabled = true;
+  let data;
+  try {
+    data = await loadPlaylistInfo(url);
+  } catch (err) {
+    setStatus(err.message, 'error');
+    return;
+  } finally {
+    _dom.dlAllBtn.disabled = false;
+  }
+  if (!data) return;
+  if (!data.entries.length) { setStatus('This playlist is empty.', 'error'); return; }
+  enqueuePlaylist(url, fmt, data.entries);
 });

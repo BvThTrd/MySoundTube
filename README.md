@@ -85,13 +85,18 @@ Single track
 Playlist
   - Paste a SoundCloud `/sets/` URL or a YouTube playlist URL
   - A banner shows the playlist name and track count
-  - "Convert All (ZIP)" downloads every track/video in one archive
-  - `MP4` is available for YouTube playlists (one MP4 per video, zipped)
+  - "Convert All (one by one)" adds every track to the queue as its own job, each with
+    its own Download button: a track that fails (DRM, Go+, unavailable) shows its error
+    on its row and the others are not affected
+  - `MP4` is available for YouTube playlists (one MP4 per video)
 
 Download queue
   - Up to 5 downloads run concurrently
   - Additional jobs wait in a visual queue showing their position
   - Queue drains automatically as slots free up
+  - The terminal icon next to Download (TRACES) shows the yt-dlp debug output: every command
+    run (fallback retries included) with its `--verbose` stdout/stderr. Proxy credentials are
+    masked. Also available on failed jobs, to see why a track failed
 
 Metadata embedded in every file
   - Title:  track/video title from the source platform
@@ -140,7 +145,7 @@ TROUBLESHOOTING
 - **Port conflict** — Set `PORT=8080` (or any free port) in `.env` or Portainer
 - **`$` sign in hash broken** — In `.env`, escape every `$` in the bcrypt hash as `$$`
 - **Error message** — The real yt-dlp error is shown in the UI, with a hint when it is a
-  geo-restriction or a login problem
+  geo-restriction or a login problem. Open TRACES on the job for the full yt-dlp debug log
 - **YouTube downloads failing / "formats missing"** — yt-dlp breaks whenever YouTube changes.
   Rebuild without cache to pull the latest yt-dlp: `docker compose build --no-cache && docker compose up -d`
 - **Geo-restricted** — Set `YTDLP_PROXY` to a proxy in a country where the track is available.
@@ -148,7 +153,7 @@ TROUBLESHOOTING
   (`network_mode: "service:gluetun"`)
 - **SoundCloud Go+ tracks** — SoundCloud only serves free accounts a 30 s preview of these
   (mostly major-label releases). The app refuses previews instead of delivering a 30 s file;
-  in a playlist these tracks are skipped and the rest is zipped
+  in a playlist these tracks fail on their own row and the rest downloads normally
 
 
 PRIVATE PLAYLISTS
